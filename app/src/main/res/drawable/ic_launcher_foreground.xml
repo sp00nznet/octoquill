@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- quill shaft -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M30,80 L34,84 L72,46 L68,42 Z" />
+    <!-- plume -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M68,42 C78,30 84,26 86,24 C84,34 82,46 74,54 C70,58 64,58 62,52 Z" />
+    <!-- ink drop -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M28,82 m-5,0 a5,5 0 1,0 10,0 a5,5 0 1,0 -10,0" />
+</vector>
