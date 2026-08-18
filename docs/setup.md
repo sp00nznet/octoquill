@@ -22,6 +22,8 @@ Two ways in, neither of which needs a server of your own.
 
 Paste a token with the `repo` scope. Works the moment the app builds.
 
+<p align="center"><img src="screenshots/01-sign-in.png" width="230"><br><sub><i>With no OAuth app configured, this is the whole sign-in screen.</i></sub></p>
+
 Prefer a **fine-grained** token scoped to the one repo you actually write in, rather than a
 classic `repo` token. A classic token on a lost phone reads every private repo you own.
 
@@ -48,7 +50,11 @@ Leave that blank and the app shows only the token field.
 1. Sign in.
 2. **Star** the repo you write in. That makes it home, and the app opens straight into it on
    every later launch — including with no signal.
+
+<p align="center"><img src="screenshots/02-repos.png" width="230"><br><sub><i>The star sets your home repo.</i></sub></p>
 3. Open the repo and tap **Save repo for offline** to pull every text file down.
+
+<p align="center"><img src="screenshots/03-browse.png" width="230"><br><sub><i>Images and binaries are hidden by default; one tap shows them.</i></sub></p>
 
 Do step 3 before you go anywhere without coverage. Without it you can only read the files
 you happened to open.

@@ -38,6 +38,8 @@ Entries are keyed by `repo + branch + path`, so committing the same file twice r
 queued version instead of stacking intermediate states. For writing that is what you want:
 the last thing you wrote is the thing that should land.
 
+<p align="center"><img src="screenshots/05-commit.png" width="230"><br><sub><i>Committing online. The same button reads just &quot;Commit&quot; with no signal, and says so.</i></sub></p>
+
 Consequences worth knowing:
 
 - **Nothing is ever "lost to a failed commit."** A failure is just a commit that has not
@@ -76,10 +78,14 @@ Reading only covers files you have actually fetched, which is no use if the plan
 somewhere remote and write. **Save repo for offline** walks the whole tree and caches every
 text file under the API's 1MB inline limit, skipping media.
 
+<p align="center"><img src="screenshots/15-sync-offline.png" width="230"><br><sub><i>Pulling the whole repo down before losing signal.</i></sub></p>
+
 ## Long documents
 
 A phone text field cannot hold a book. Open a markdown file with 12+ headings, or over 64KB,
 and Octoquill shows the outline instead. Pick a heading and you edit only that slice.
+
+<p align="center"><img src="screenshots/11-section-edit.png" width="230"><br><sub><i>Editing one section. Only this slice is in the text field.</i></sub></p>
 
 `Sections.kt` is pure Kotlin with no Compose imports, so it is unit-tested properly:
 
@@ -99,6 +105,8 @@ moved rather than clobbering it.
 |---|---|---|
 | File changed on GitHub since you opened it | `409` | Entry marked conflicted, stays queued |
 | New-file path onto a file that already exists | `422` | Same |
+
+<p align="center"><img src="screenshots/08-conflict.png" width="230"><br><sub><i>Raised for real by committing to the same file from a laptop mid-edit.</i></sub></p>
 
 A conflicted entry is never retried automatically. It waits on the Pending screen with
 **Overwrite** (re-fetch the current sha and commit on top — the other version stays in
