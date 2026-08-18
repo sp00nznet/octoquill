@@ -14,6 +14,12 @@ get a signal back, without you doing anything.
 <td align="center"><img src="docs/screenshots/09-offline-queued.png" width="185"><br><sub>Commits wait on the phone</sub></td>
 <td align="center"><img src="docs/screenshots/06-pushed.png" width="185"><br><sub>and land by themselves</sub></td>
 </tr>
+<tr>
+<td align="center"><img src="docs/screenshots/10-outline.png" width="185"><br><sub>Outline of a long draft</sub></td>
+<td align="center"><img src="docs/screenshots/12-preview.png" width="185"><br><sub>Read mode</sub></td>
+<td align="center"><img src="docs/screenshots/13-pending.png" width="185"><br><sub>What is still on the phone</sub></td>
+<td align="center"><img src="docs/screenshots/07-draft.png" width="185"><br><sub>Recovered after a kill</sub></td>
+</tr>
 </table>
 
 ---
@@ -43,15 +49,6 @@ stops being a problem at all.
 | **Survives editing in two places** | Committed from a laptop while the phone had the file open? GitHub rejects the stale write, your version stays queued and safe, and you choose. |
 | **Reads like prose** | Markdown preview, live word count, images and binaries hidden by default. |
 | **Manages files** | New, rename, delete, branch switching, per-file history. |
-
-<table>
-<tr>
-<td align="center"><img src="docs/screenshots/10-outline.png" width="185"><br><sub>Outline of a long draft</sub></td>
-<td align="center"><img src="docs/screenshots/12-preview.png" width="185"><br><sub>Read mode</sub></td>
-<td align="center"><img src="docs/screenshots/13-pending.png" width="185"><br><sub>What is still on the phone</sub></td>
-<td align="center"><img src="docs/screenshots/07-draft.png" width="185"><br><sub>Recovered after a kill</sub></td>
-</tr>
-</table>
 
 ## Start
 
