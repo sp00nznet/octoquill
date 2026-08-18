@@ -23,9 +23,9 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.ExitToApp
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
-import androidx.compose.material.icons.automirrored.filled.ExitToApp
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.AlertDialog
@@ -70,6 +70,28 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
+/** Things you cannot edit in a text field. Hidden unless "show everything" is on. */
+private val MEDIA = setOf(
+    "jpg", "jpeg", "png", "gif", "webp", "bmp", "ico", "svg", "pdf", "zip", "gz", "tar",
+    "mp3", "mp4", "mov", "wav", "ttf", "otf", "woff", "woff2", "pyc", "class", "jar",
+    "so", "dll", "bin", "db", "sqlite", "psd", "heic",
+)
+
+private fun isMedia(name: String) = name.substringAfterLast('.', "").lowercase() in MEDIA
+
+/** Word count for prose. One pass, cheap enough to run per keystroke. */
+private fun wordCount(s: String): Int {
+    var n = 0
+    var inWord = false
+    for (c in s) {
+        if (c.isWhitespace()) inWord = false
+        else if (!inWord) {
+            inWord = true; n++
+        }
+    }
+    return n
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun App(vm: Vm) {
@@ -94,7 +116,9 @@ fun App(vm: Vm) {
                     title = { Text(vm.user?.login ?: "Repositories") },
                     actions = {
                         IconButton(onClick = vm::refresh) { Icon(Icons.Default.Refresh, "Refresh") }
-                        IconButton(onClick = vm::signOut) { Icon(Icons.AutoMirrored.Filled.ExitToApp, "Sign out") }
+                        IconButton(onClick = vm::signOut) {
+                            Icon(Icons.AutoMirrored.Filled.ExitToApp, "Sign out")
+                        }
                     },
                 )
 
@@ -121,27 +145,30 @@ fun App(vm: Vm) {
                     },
                 )
 
-                is Screen.Edit -> TopAppBar(
-                    title = {
-                        Column {
-                            Text(
-                                s.path.substringAfterLast('/') + if (vm.dirty) " •" else "",
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                            Text(
-                                "${s.repo.name} @ ${s.branch}",
-                                style = MaterialTheme.typography.labelSmall,
-                                maxLines = 1,
-                            )
-                        }
-                    },
-                    navigationIcon = {
-                        IconButton(onClick = { leave() }) {
-                            Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back")
-                        }
-                    },
-                )
+                is Screen.Edit -> {
+                    val words = remember(vm.text) { wordCount(vm.text) }
+                    TopAppBar(
+                        title = {
+                            Column {
+                                Text(
+                                    s.path.substringAfterLast('/') + if (vm.dirty) " •" else "",
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                                Text(
+                                    "${s.branch} · $words words",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    maxLines = 1,
+                                )
+                            }
+                        },
+                        navigationIcon = {
+                            IconButton(onClick = { leave() }) {
+                                Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back")
+                            }
+                        },
+                    )
+                }
             }
         },
         floatingActionButton = {
@@ -161,11 +188,11 @@ fun App(vm: Vm) {
         },
     ) { pad ->
         Box(Modifier.padding(pad).fillMaxSize()) {
-            when (val s = vm.screen) {
+            when (vm.screen) {
                 Screen.Login -> LoginScreen(vm)
                 Screen.Repos -> RepoList(vm)
                 is Screen.Browse -> Browser(vm)
-                is Screen.Edit -> Editor(vm, s)
+                is Screen.Edit -> Editor(vm)
             }
             if (vm.busy) {
                 LinearProgressIndicator(Modifier.fillMaxWidth().align(Alignment.TopCenter))
@@ -175,13 +202,49 @@ fun App(vm: Vm) {
 
     if (confirmLeave) AlertDialog(
         onDismissRequest = { confirmLeave = false },
-        title = { Text("Discard changes?") },
-        text = { Text("This file has edits that were never committed.") },
+        title = { Text("Leave without committing?") },
+        text = {
+            Text(
+                "Your edits stay saved on this phone and will be here when you come back. " +
+                    "They are just not on GitHub yet."
+            )
+        },
         confirmButton = {
-            TextButton(onClick = { confirmLeave = false; vm.back() }) { Text("Discard") }
+            TextButton(onClick = { confirmLeave = false; vm.back() }) { Text("Leave") }
         },
         dismissButton = { TextButton(onClick = { confirmLeave = false }) { Text("Keep editing") } },
     )
+
+    vm.pendingDraft?.let { draft ->
+        AlertDialog(
+            onDismissRequest = {},
+            title = { Text("Unsaved writing found") },
+            text = {
+                Text(
+                    "You edited this file on the phone and never committed it " +
+                        "(${wordCount(draft)} words). Keep that, or start from what is on GitHub?"
+                )
+            },
+            confirmButton = { TextButton(onClick = vm::restoreDraft) { Text("Keep mine") } },
+            dismissButton = { TextButton(onClick = vm::discardDraft) { Text("Use GitHub version") } },
+        )
+    }
+
+    vm.conflict?.let {
+        AlertDialog(
+            onDismissRequest = vm::dismissConflict,
+            title = { Text("Changed on GitHub") },
+            text = {
+                Text(
+                    "This file was committed somewhere else — the web editor, or a laptop — " +
+                        "since you opened it. Overwriting replaces that version with yours; " +
+                        "it stays in the repo history either way. Your text is saved regardless."
+                )
+            },
+            confirmButton = { TextButton(onClick = vm::overwrite) { Text("Overwrite") } },
+            dismissButton = { TextButton(onClick = vm::dismissConflict) { Text("Cancel") } },
+        )
+    }
 
     if (commitOpen) {
         val s = vm.screen as? Screen.Edit
@@ -214,7 +277,7 @@ private fun LoginScreen(vm: Vm) {
     ) {
         Text("Octoquill", style = MaterialTheme.typography.displaySmall)
         Text(
-            "Edit files and push commits from your phone",
+            "Write, commit, push",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -246,7 +309,10 @@ private fun LoginScreen(vm: Vm) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
                         Spacer(Modifier.width(8.dp))
-                        Text("Waiting for you to approve…", style = MaterialTheme.typography.bodySmall)
+                        Text(
+                            "Waiting for you to approve…",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
                     }
                     TextButton(onClick = vm::cancelDeviceSignIn) { Text("Cancel") }
                 }
@@ -289,7 +355,8 @@ private fun LoginScreen(vm: Vm) {
 private fun RepoList(vm: Vm) {
     var q by remember { mutableStateOf("") }
     val shown = remember(q, vm.repos) {
-        if (q.isBlank()) vm.repos else vm.repos.filter { it.full_name.contains(q, ignoreCase = true) }
+        if (q.isBlank()) vm.repos
+        else vm.repos.filter { it.full_name.contains(q, ignoreCase = true) }
     }
 
     Column(Modifier.fillMaxSize()) {
@@ -305,10 +372,15 @@ private fun RepoList(vm: Vm) {
             items(shown, key = { it.full_name }) { r ->
                 ListItem(
                     headlineContent = { Text(r.full_name) },
-                    supportingContent = r.description?.let { { Text(it, maxLines = 2, overflow = TextOverflow.Ellipsis) } },
-                    trailingContent = if (r.private) {
-                        { Text("private", style = MaterialTheme.typography.labelSmall) }
-                    } else null,
+                    supportingContent = r.description?.let {
+                        { Text(it, maxLines = 2, overflow = TextOverflow.Ellipsis) }
+                    },
+                    trailingContent = {
+                        // star a repo and the app opens straight into it next launch
+                        IconButton(onClick = { vm.setHome(r.full_name) }) {
+                            Text(if (vm.homeRepo == r.full_name) "★" else "☆")
+                        }
+                    },
                     modifier = Modifier.clickable { vm.openRepo(r) },
                 )
                 HorizontalDivider()
@@ -319,38 +391,62 @@ private fun RepoList(vm: Vm) {
 
 @Composable
 private fun Browser(vm: Vm) {
-    LazyColumn(Modifier.fillMaxSize()) {
-        items(vm.entries, key = { it.path }) { e ->
-            ListItem(
-                leadingContent = { Text(if (e.type == "dir") "📁" else "📄") },
-                headlineContent = { Text(e.name) },
-                supportingContent = if (e.type == "file") {
-                    { Text("${e.size} B", style = MaterialTheme.typography.labelSmall) }
-                } else null,
-                modifier = Modifier.clickable { vm.open(e) },
-            )
-            HorizontalDivider()
+    val shown = if (vm.showAll) vm.entries
+    else vm.entries.filter { it.type == "dir" || !isMedia(it.name) }
+    val hidden = vm.entries.size - shown.size
+
+    Column(Modifier.fillMaxSize()) {
+        LazyColumn(Modifier.weight(1f)) {
+            items(shown, key = { it.path }) { e ->
+                ListItem(
+                    leadingContent = { Text(if (e.type == "dir") "📁" else "📄") },
+                    headlineContent = { Text(e.name) },
+                    supportingContent = if (e.type == "file") {
+                        {
+                            Text(
+                                "${e.size / 1024} KB" +
+                                    if (e.size > BIG_FILE_BYTES) " · large" else "",
+                                style = MaterialTheme.typography.labelSmall,
+                            )
+                        }
+                    } else null,
+                    modifier = Modifier.clickable { vm.open(e) },
+                )
+                HorizontalDivider()
+            }
+        }
+        if (hidden > 0 || vm.showAll) {
+            TextButton(
+                onClick = { vm.showAll = !vm.showAll },
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(
+                    if (vm.showAll) "Hide images and binaries"
+                    else "$hidden hidden — show everything"
+                )
+            }
         }
     }
 }
 
 @Composable
-private fun Editor(vm: Vm, s: Screen.Edit) {
+private fun Editor(vm: Vm) {
     Box(Modifier.fillMaxSize().imePadding().verticalScroll(rememberScrollState())) {
         BasicTextField(
             value = vm.text,
-            onValueChange = { vm.text = it },
+            onValueChange = vm::onTextChange,
             modifier = Modifier.fillMaxWidth().padding(12.dp),
             textStyle = TextStyle(
                 fontFamily = FontFamily.Monospace,
-                fontSize = 13.sp,
+                fontSize = 14.sp,
+                lineHeight = 22.sp,
                 color = MaterialTheme.colorScheme.onSurface,
             ),
             cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
             decorationBox = { inner ->
                 if (vm.text.isEmpty()) {
                     Text(
-                        "Empty file — start typing",
+                        "Empty file — start writing",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -418,7 +514,7 @@ private fun NewFileDialog(onDismiss: () -> Unit, onCreate: (String) -> Unit) {
                 value = name,
                 onValueChange = { name = it },
                 label = { Text("Filename") },
-                placeholder = { Text("notes.md") },
+                placeholder = { Text("napa-rewrite.md") },
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
             )

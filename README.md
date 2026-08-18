@@ -1,87 +1,123 @@
 # Octoquill
 
-An Android GitHub client you can actually **edit files in**. Sign in, browse your repos,
-open a file, change it, write a commit message, push — all from the phone.
+A phone client for a **writing repo**. Your prose lives in a private GitHub repo as
+markdown; Octoquill opens it on your phone, lets you edit in a real text field, attach a
+commit message, and push — without a laptop and without a git implementation.
 
-## Why this one edits files
+Built against [`writing-archive`](https://github.com/sp00nznet/writing-archive), but it
+works for any repo you keep text in: a journal, notes, a manuscript, a wiki, config.
 
-Most Android GitHub clients stop at browsing because "commit and push from a phone"
-sounds like it needs a full git implementation (JGit, a local clone, a working tree,
-credentials for the transport). It doesn't.
+## Why this one can edit files
+
+Most Android GitHub clients stop at browsing, because "commit and push from a phone"
+sounds like it needs JGit, a local clone, a working tree and transport credentials.
+It doesn't.
 
 GitHub's **Contents API** does the whole thing server-side in one request:
 
 ```
 PUT /repos/{owner}/{repo}/contents/{path}
-{ "message": "...", "content": "<base64>", "sha": "<blob being replaced>", "branch": "main" }
+{ "message": …, "content": <base64>, "sha": <blob being replaced>, "branch": … }
 ```
 
 That single call writes the blob, builds the tree, creates the commit, and moves the
-branch ref. There is no clone, no push, no merge — the commit lands on the remote
-directly. `Gh.commit()` in `Api.kt` is the entire "push from phone" feature.
+branch ref. No clone, no push, no merge. `Gh.commit()` in `Api.kt` is the entire feature.
 
-Trade-off: one file per commit, and no offline editing. Both are fine for the thing this
-app is for — fixing a typo, tweaking a config, jotting a note — and neither is worth
-dragging JGit onto a phone for.
+Trade-off: **one file per commit**, and no offline browsing. Both are fine for the way
+writing actually happens on a phone — you open one piece, work on it, and commit it.
+
+## The two things that will actually bite you
+
+**1. Losing writing.** Android kills backgrounded apps. Two thousand words typed on a
+train, never committed, gone. So the editor buffer is mirrored to disk (`Drafts.kt`) on a
+600ms debounce and again on `onStop()`, and is only cleared once the commit lands. Reopen
+a file with an uncommitted draft and you get *"Unsaved writing found — keep mine / use
+GitHub version"*. Drafts deliberately survive sign-out.
+
+**2. Editing in two places.** `writing-archive`'s own README says it: *"Edit in one place
+at a time. If you commit from the GitHub web editor, say so, so the next local session
+pulls first."* The phone makes that a third location. The Contents API's `sha` parameter
+is the guard — GitHub rejects a commit built on a stale blob rather than clobbering:
+
+| situation | status | what the app does |
+|---|---|---|
+| file changed on GitHub since you opened it | `409` | *Changed on GitHub* → Overwrite / Cancel |
+| new-file path onto a file that already exists | `422` | same dialog |
+
+**Overwrite** re-fetches the current sha and commits on top; the other version stays in
+the repo history. Either way your text is on disk, so nothing is lost while you decide.
+Both status codes are asserted in the check script — the recovery dialog keys on them.
+
+## Everything else it does
+
+- **Sign in with GitHub** (OAuth device flow) or paste a personal access token
+- **Star a repo** to make it home — the app opens straight into it next launch
+- **Hides images and binaries** by default; a writing repo is mostly prose, and
+  `writing-archive` has 18 JPGs sat in the root. One tap shows everything.
+- **Live word count** in the title bar, and a size warning on files big enough to make a
+  phone text field lag
 
 ## Auth
 
-Two ways in, both without a backend server:
+Two ways in, neither needing a backend server:
 
-1. **Sign in with GitHub** (OAuth device flow) — the app shows a code, you enter it at
+1. **Sign in with GitHub** — the app shows a code, you enter it at
    `github.com/login/device`. No redirect URI, no client secret. Needs a one-time OAuth
-   App on your account; see setup below.
-2. **Personal access token** — paste a `repo`-scoped token. Works with zero setup.
+   App; see below.
+2. **Personal access token** — paste a `repo`-scoped token. Zero setup.
 
-The token is stored in app-private `SharedPreferences` with `allowBackup=false`.
+Token is stored in app-private `SharedPreferences` with `allowBackup=false`.
 
 ### Enabling device-flow sign-in
 
 1. https://github.com/settings/developers → **New OAuth App**
-2. Name: `Octoquill`, Homepage URL: anything (`https://github.com/sp00nznet/octoquill`),
-   Authorization callback URL: anything (device flow never uses it)
-3. On the created app, tick **Enable Device Flow** and save
-4. Copy the Client ID into `gradle.properties`:
+2. Name `Octoquill`, homepage and callback URL can be anything (device flow never uses
+   the callback)
+3. On the created app tick **Enable Device Flow** and save
+4. Put the Client ID in `gradle.properties`:
    ```
    octoquill.clientId=Ov23li...
    ```
 
-Leave it blank and the app just shows the token field.
+Leave it blank and the app shows only the token field.
 
 ## Build
 
 ```
 ./gradlew :app:assembleDebug
-# app/build/outputs/apk/debug/app-debug.apk
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
-Requires JDK 17+ and an Android SDK with API 36. `local.properties` points at the SDK.
+JDK 17+, Android SDK with API 36. `local.properties` points at the SDK.
 
-## Checking the API contract
-
-The one piece worth verifying outside the app is that the Contents API request shape
-really produces a commit. `tools/check-contents-api.sh` does exactly that against a
-scratch repo using the same JSON body the app sends:
+## Check
 
 ```
 ./tools/check-contents-api.sh <owner>/<repo>
 ```
+
+Creates, updates, reads back, asserts the 409 and 422 conflict codes, deletes, and
+confirms the branch ref moved. Idempotent — safe to re-run. Use a scratch repo.
 
 ## Layout
 
 | File | What's in it |
 |---|---|
 | `Api.kt` | GitHub REST calls + OAuth device flow. All the network code. |
-| `MainActivity.kt` | `Vm` — the whole app state, a screen back-stack, and the actions. |
-| `Screens.kt` | Compose UI: login, repo list, file browser, editor, dialogs. |
+| `Drafts.kt` | Disk mirror of the editor buffer. The anti-data-loss file. |
+| `MainActivity.kt` | `Vm` — app state, screen back-stack, and every action. |
+| `Screens.kt` | Compose UI: login, repo list, browser, editor, dialogs. |
 
-Three files. No DI framework, no navigation library, no repository layer, no git library.
+No DI framework, no navigation library, no repository layer, no git library.
 
 ## Not built yet
 
+- **Section editing.** `MANUSCRIPT.md` is 142KB across 65 headings; a phone text field
+  will struggle with the whole thing at once. Splitting on headings and committing one
+  section back is the obvious fix — worth building the first time it actually gets in the
+  way, not before. The feeder files (`napa.md`, `phone-months.md`) are 6–16KB and fine.
 - Multi-file commits (needs the Git Data API: blobs → tree → commit → ref)
-- Diffs, PRs, issues, history
-- Syntax highlighting
-- Offline / drafts
-- File rename and delete (the Contents API supports delete; nothing calls it yet)
+- Offline browsing — drafts persist, but the file list and file bodies need the network
+- Diffs, history, PRs, issues
+- Markdown preview, syntax highlighting
+- Rename and delete (the Contents API supports delete; nothing calls it yet)

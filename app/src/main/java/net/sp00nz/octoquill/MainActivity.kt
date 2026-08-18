@@ -7,6 +7,7 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.viewModels
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
@@ -21,9 +22,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 sealed interface Screen {
@@ -33,12 +34,16 @@ sealed interface Screen {
     data class Edit(val repo: Repo, val branch: String, val path: String) : Screen
 }
 
+/** Files worth warning about before opening them in a phone text field. */
+const val BIG_FILE_BYTES = 64_000L
+
 class Vm(app: Application) : AndroidViewModel(app) {
 
     // ponytail: token lives in app-private prefs with allowBackup=false. Android's
     // file-based encryption already covers it at rest; reach for EncryptedSharedPreferences
     // only if this ever ships somewhere that isn't true.
     private val prefs = app.getSharedPreferences("octoquill", Context.MODE_PRIVATE)
+    private val drafts = Drafts(app)
     private var gh: Gh? = null
 
     val stack = mutableStateListOf<Screen>(Screen.Login)
@@ -53,6 +58,12 @@ class Vm(app: Application) : AndroidViewModel(app) {
     var entries by mutableStateOf(emptyList<Entry>()); private set
     var branches by mutableStateOf(emptyList<String>()); private set
 
+    /** The repo you actually live in — opened straight after sign-in. */
+    var homeRepo by mutableStateOf(prefs.getString("home", null)); private set
+
+    /** Media and binaries are hidden by default; a writing repo is mostly prose. */
+    var showAll by mutableStateOf(false)
+
     /** Editor buffer. */
     var text by mutableStateOf("")
     private var saved by mutableStateOf("")
@@ -60,8 +71,15 @@ class Vm(app: Application) : AndroidViewModel(app) {
     val dirty: Boolean get() = text != saved
     val isNewFile: Boolean get() = blobSha == null
 
+    /** A draft recovered from disk that differs from what GitHub has. */
+    var pendingDraft by mutableStateOf<String?>(null); private set
+
+    /** Set when a commit was rejected because the file moved under us; holds the message. */
+    var conflict by mutableStateOf<String?>(null); private set
+
     var device by mutableStateOf<DeviceCode?>(null); private set
     private var deviceJob: Job? = null
+    private var draftJob: Job? = null
 
     val hasOAuthApp = BuildConfig.GITHUB_CLIENT_ID.isNotBlank()
 
@@ -85,6 +103,8 @@ class Vm(app: Application) : AndroidViewModel(app) {
 
     private fun api(): Gh = gh ?: error("Not signed in")
 
+    // ---- auth -------------------------------------------------------------
+
     private suspend fun applyToken(token: String, persist: Boolean) {
         val g = Gh(token.trim())
         // me() is the cheapest way to find out the token is junk before we store it
@@ -100,6 +120,7 @@ class Vm(app: Application) : AndroidViewModel(app) {
         repos = g.repos()
         stack.clear()
         stack += Screen.Repos
+        repos.firstOrNull { it.full_name == homeRepo }?.let { enterRepo(it) }
     }
 
     fun signInWithToken(token: String) {
@@ -134,17 +155,25 @@ class Vm(app: Application) : AndroidViewModel(app) {
         user = null; repos = emptyList(); entries = emptyList(); branches = emptyList()
         stack.clear()
         stack += Screen.Login
+        // ponytail: drafts deliberately survive sign-out — signing out should not eat writing
     }
 
-    fun openRepo(r: Repo) {
-        job {
-            val g = api()
-            val list = g.list(r.full_name, "", r.default_branch)
-            branches = runCatching { g.branches(r.full_name) }.getOrDefault(listOf(r.default_branch))
-            entries = list
-            stack += Screen.Browse(r, r.default_branch, "")
-        }
+    // ---- navigation -------------------------------------------------------
+
+    fun setHome(fullName: String) {
+        homeRepo = if (homeRepo == fullName) null else fullName
+        prefs.edit().putString("home", homeRepo).apply()
     }
+
+    private suspend fun enterRepo(r: Repo) {
+        val g = api()
+        val list = g.list(r.full_name, "", r.default_branch)
+        branches = runCatching { g.branches(r.full_name) }.getOrDefault(listOf(r.default_branch))
+        entries = list
+        stack += Screen.Browse(r, r.default_branch, "")
+    }
+
+    fun openRepo(r: Repo) = job { enterRepo(r) }
 
     fun open(e: Entry) {
         val b = screen as? Screen.Browse ?: return
@@ -155,6 +184,9 @@ class Vm(app: Application) : AndroidViewModel(app) {
             } else {
                 val (body, sha) = api().read(b.repo.full_name, e.path, b.branch)
                 text = body; saved = body; blobSha = sha
+                // an interrupted session usually beats what GitHub has, but the writer decides
+                pendingDraft = drafts.load(b.repo.full_name, b.branch, e.path)?.takeIf { it != body }
+                if (e.size > BIG_FILE_BYTES) notice = "${e.size / 1024}KB — the editor may lag"
                 stack += Screen.Edit(b.repo, b.branch, e.path)
             }
         }
@@ -162,7 +194,7 @@ class Vm(app: Application) : AndroidViewModel(app) {
 
     fun newFile(name: String) {
         val b = screen as? Screen.Browse ?: return
-        text = ""; saved = ""; blobSha = null
+        text = ""; saved = ""; blobSha = null; pendingDraft = null
         stack += Screen.Edit(
             b.repo, b.branch,
             if (b.path.isEmpty()) name.trim('/') else "${b.path}/${name.trim('/')}"
@@ -174,7 +206,7 @@ class Vm(app: Application) : AndroidViewModel(app) {
         if (b.branch == name) return
         job {
             entries = api().list(b.repo.full_name, b.path, name)
-            // keep the whole trail on one branch, so going back doesn't silently jump back
+            // keep the whole trail on one branch, so going back does not silently jump back
             for (i in stack.indices) (stack[i] as? Screen.Browse)?.let { stack[i] = it.copy(branch = name) }
         }
     }
@@ -189,18 +221,71 @@ class Vm(app: Application) : AndroidViewModel(app) {
 
     fun back() {
         if (stack.size <= 1) return
+        flushDraft()
         stack.removeAt(stack.lastIndex)
         (screen as? Screen.Browse)?.let { s ->
             job { entries = api().list(s.repo.full_name, s.path, s.branch) }
         }
     }
 
+    // ---- editing ----------------------------------------------------------
+
+    /** Every keystroke updates the buffer; a debounced write mirrors it to disk. */
+    fun onTextChange(v: String) {
+        text = v
+        val s = screen as? Screen.Edit ?: return
+        draftJob?.cancel()
+        draftJob = viewModelScope.launch {
+            delay(600)
+            drafts.save(s.repo.full_name, s.branch, s.path, v)
+        }
+    }
+
+    /** Called when the app is backgrounded — no debounce, write it now. */
+    fun flushDraft() {
+        val s = screen as? Screen.Edit ?: return
+        draftJob?.cancel()
+        if (dirty || isNewFile) drafts.save(s.repo.full_name, s.branch, s.path, text)
+    }
+
+    fun restoreDraft() {
+        pendingDraft?.let { text = it }
+        pendingDraft = null
+    }
+
+    fun discardDraft() {
+        val s = screen as? Screen.Edit
+        pendingDraft = null
+        if (s != null) drafts.clear(s.repo.full_name, s.branch, s.path)
+    }
+
+    // ---- committing -------------------------------------------------------
+
     /** Commit *and* push, in one API call. */
     fun commit(message: String) {
         val s = screen as? Screen.Edit ?: return
-        val body = text
+        job { push(s, message, force = false) }
+    }
+
+    /** After a conflict: take whatever sha is on the branch now and write over it. */
+    fun overwrite() {
+        val s = screen as? Screen.Edit ?: return
+        val message = conflict ?: return
+        conflict = null
         job {
-            val c = api().commit(
+            blobSha = api().shaOf(s.repo.full_name, s.path, s.branch)
+            push(s, message, force = true)
+        }
+    }
+
+    fun dismissConflict() {
+        conflict = null
+    }
+
+    private suspend fun push(s: Screen.Edit, message: String, force: Boolean) {
+        val body = text
+        val c = try {
+            api().commit(
                 repo = s.repo.full_name,
                 path = s.path,
                 text = body,
@@ -208,24 +293,42 @@ class Vm(app: Application) : AndroidViewModel(app) {
                 branch = s.branch,
                 sha = blobSha,
             )
-            saved = body
-            notice = "Pushed ${c.sha.take(7)} to ${s.branch}"
-            back()
+        } catch (t: Throwable) {
+            // 409/422 means the file changed on GitHub since we opened it — a commit from
+            // the web editor or a laptop. The draft is already on disk, so nothing is lost
+            // whichever way this goes; let the writer decide.
+            if (!force && t.httpStatus in setOf(409, 422)) {
+                conflict = message
+                return
+            }
+            throw t
         }
+        saved = body
+        drafts.clear(s.repo.full_name, s.branch, s.path)
+        notice = "Pushed ${c.sha.take(7)} to ${s.branch}"
+        back()
     }
 
-    override fun onCleared() = gh?.close() ?: Unit
+    override fun onCleared() {
+        flushDraft()
+        gh?.close()
+    }
 }
 
 class MainActivity : ComponentActivity() {
+
+    private val vm: Vm by viewModels()
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        setContent {
-            OctoquillTheme {
-                App(viewModel<Vm>())
-            }
-        }
+        setContent { OctoquillTheme { App(vm) } }
+    }
+
+    /** Last chance to get the buffer onto disk before Android is free to kill us. */
+    override fun onStop() {
+        super.onStop()
+        vm.flushDraft()
     }
 }
 

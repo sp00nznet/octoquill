@@ -122,6 +122,11 @@ class Gh(token: String) {
         return String(bytes, Charsets.UTF_8) to e.sha
     }
 
+    /** Current blob sha for a path, or null if it isn't there any more. */
+    suspend fun shaOf(repo: String, path: String, ref: String): String? = runCatching {
+        JSON.decodeFromJsonElement<Entry>(contents(repo, path, ref)).sha
+    }.getOrNull()
+
     /**
      * Create or update a file on [branch]. This one call *is* the commit and the push —
      * GitHub writes the blob, the tree, the commit and moves the ref server-side.
@@ -146,6 +151,10 @@ class Gh(token: String) {
         )
     }.body<PutResp>().commit
 }
+
+/** HTTP status of a failed call, or null if it never got that far. */
+val Throwable.httpStatus: Int?
+    get() = (this as? ResponseException)?.response?.status?.value
 
 /** Turns a ktor/HTTP failure into something worth putting on screen. */
 suspend fun Throwable.readable(): String = when (this) {
