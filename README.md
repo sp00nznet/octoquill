@@ -52,6 +52,9 @@ stops being a problem at all.
 
 ## Start
 
+**[Download the latest APK](https://github.com/sp00nznet/octoquill/releases/latest)** —
+signed release build, Android 8.0+. Or build it:
+
 ```bash
 ./gradlew :app:assembleDebug
 adb install -r app/build/outputs/apk/debug/app-debug.apk
