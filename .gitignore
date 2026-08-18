@@ -8,3 +8,4 @@ build/
 .idea/
 .kotlin/
 .DS_Store
+octoquill-keystore-password.txt
