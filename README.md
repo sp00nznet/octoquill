@@ -7,6 +7,22 @@ commit message, and push — without a laptop and without a git implementation.
 Built against [`writing-archive`](https://github.com/sp00nznet/writing-archive), but it
 works for any repo you keep text in: a journal, notes, a manuscript, a wiki, config.
 
+## What it looks like
+
+Captured on a Pixel 6 emulator against a throwaway demo repo — every one of these is the
+real app talking to the real GitHub API.
+
+| | | | |
+|:--:|:--:|:--:|:--:|
+| <img src="docs/screenshots/01-sign-in.png" width="190"> | <img src="docs/screenshots/02-repos.png" width="190"> | <img src="docs/screenshots/03-browse.png" width="190"> | <img src="docs/screenshots/04-editing.png" width="190"> |
+| Sign in | Star a repo to make it home | Images and binaries hidden | Editing, with live word count |
+| <img src="docs/screenshots/05-commit.png" width="190"> | <img src="docs/screenshots/06-pushed.png" width="190"> | <img src="docs/screenshots/07-draft.png" width="190"> | <img src="docs/screenshots/08-conflict.png" width="190"> |
+| Write the commit message | Pushed — commit sha, straight to the branch | Draft recovered after the app was killed | Someone else committed first |
+
+The last two are the ones worth caring about, and both were triggered for real: the draft
+survived a force-stop *and* an APK reinstall, and the conflict came from committing to the
+same file from a laptop while the phone had it open.
+
 ## Why this one can edit files
 
 Most Android GitHub clients stop at browsing, because "commit and push from a phone"
@@ -109,6 +125,17 @@ confirms the branch ref moved. Idempotent — safe to re-run. Use a scratch repo
 | `Screens.kt` | Compose UI: login, repo list, browser, editor, dialogs. |
 
 No DI framework, no navigation library, no repository layer, no git library.
+
+## Found by actually running it
+
+Driving the real app on an emulator turned up two things no amount of reading would have:
+
+- Every file read **`0 KB`** — `size / 1024` truncates, and a writing repo is full of
+  200-byte notes. Now shows bytes under 1KB.
+- A **transient network failure at startup dumped you to the sign-in screen** with a
+  perfectly good token still in prefs — the one screen you cannot act on. Only a `401`
+  signs you out now; anything else keeps the session and lets Refresh retry. Opening the
+  app on bad signal is the normal case on a phone, so this mattered.
 
 ## Not built yet
 

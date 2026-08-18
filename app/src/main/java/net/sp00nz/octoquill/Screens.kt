@@ -79,6 +79,9 @@ private val MEDIA = setOf(
 
 private fun isMedia(name: String) = name.substringAfterLast('.', "").lowercase() in MEDIA
 
+/** Short notes are common in a writing repo, and "0 KB" tells you nothing. */
+private fun humanSize(bytes: Long) = if (bytes < 1024) "$bytes B" else "${bytes / 1024} KB"
+
 /** Word count for prose. One pass, cheap enough to run per keystroke. */
 private fun wordCount(s: String): Int {
     var n = 0
@@ -404,7 +407,7 @@ private fun Browser(vm: Vm) {
                     supportingContent = if (e.type == "file") {
                         {
                             Text(
-                                "${e.size / 1024} KB" +
+                                humanSize(e.size) +
                                     if (e.size > BIG_FILE_BYTES) " · large" else "",
                                 style = MaterialTheme.typography.labelSmall,
                             )

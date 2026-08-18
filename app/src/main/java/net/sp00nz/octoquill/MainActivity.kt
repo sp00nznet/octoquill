@@ -84,7 +84,7 @@ class Vm(app: Application) : AndroidViewModel(app) {
     val hasOAuthApp = BuildConfig.GITHUB_CLIENT_ID.isNotBlank()
 
     init {
-        prefs.getString("token", null)?.let { t -> job { applyToken(t, persist = false) } }
+        prefs.getString("token", null)?.let(::restore)
     }
 
     private fun job(block: suspend () -> Unit): Job = viewModelScope.launch {
@@ -117,10 +117,32 @@ class Vm(app: Application) : AndroidViewModel(app) {
         gh = g
         user = who
         if (persist) prefs.edit().putString("token", token.trim()).apply()
-        repos = g.repos()
         stack.clear()
         stack += Screen.Repos
+        repos = g.repos()
         repos.firstOrNull { it.full_name == homeRepo }?.let { enterRepo(it) }
+    }
+
+    /**
+     * Resuming a stored session. A phone opens this app on bad signal all the time, and a
+     * dropped request must not look like being signed out — the sign-in screen is useless
+     * to someone whose token is already sitting in prefs. Only a 401 really signs you out.
+     */
+    private fun restore(token: String) {
+        job {
+            try {
+                applyToken(token, persist = false)
+            } catch (t: Throwable) {
+                if (t.httpStatus == 401) {
+                    signOut()
+                } else if (screen == Screen.Login) {
+                    gh = gh ?: Gh(token)
+                    stack.clear()
+                    stack += Screen.Repos
+                }
+                throw t
+            }
+        }
     }
 
     fun signInWithToken(token: String) {
