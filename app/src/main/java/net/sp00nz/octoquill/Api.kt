@@ -7,6 +7,7 @@ import io.ktor.client.engine.okhttp.OkHttp
 import io.ktor.client.plugins.ResponseException
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.client.plugins.defaultRequest
+import io.ktor.client.request.delete
 import io.ktor.client.request.get
 import io.ktor.client.request.header
 import io.ktor.client.request.parameter
@@ -67,6 +68,18 @@ private data class PutBody(
 @Serializable
 private data class PutResp(val commit: Commit)
 
+@Serializable
+private data class DeleteBody(val message: String, val sha: String, val branch: String)
+
+@Serializable
+data class CommitAuthor(val name: String = "", val date: String = "")
+
+@Serializable
+data class CommitMeta(val message: String = "", val author: CommitAuthor? = null)
+
+@Serializable
+data class LogEntry(val sha: String, val commit: CommitMeta)
+
 /** File contents big enough that GitHub's contents API refuses to inline them. */
 const val MAX_EDITABLE_BYTES = 1_000_000L
 
@@ -105,27 +118,43 @@ class Gh(token: String) {
         http.get(url("repos/$repo/branches")) { parameter("per_page", 100) }
             .body<List<Branch>>().map { it.name }
 
-    private suspend fun contents(repo: String, path: String, ref: String): JsonElement =
-        http.get(url("repos/$repo/contents/${path.trim('/')}")) { parameter("ref", ref) }.body()
+    /** Raw JSON, so callers can hand it straight to the offline cache. */
+    suspend fun contentsJson(repo: String, path: String, ref: String): String =
+        http.get(url("repos/$repo/contents/${path.trim('/')}")) { parameter("ref", ref) }
+            .bodyAsText()
 
     /** Directory listing, dirs first then files, case-insensitive by name. */
     suspend fun list(repo: String, path: String, ref: String): List<Entry> =
-        JSON.decodeFromJsonElement<List<Entry>>(contents(repo, path, ref))
-            .sortedWith(compareBy({ it.type != "dir" }, { it.name.lowercase() }))
+        parseList(contentsJson(repo, path, ref))
 
     /** Decoded text plus the blob sha the next commit must reference. */
-    suspend fun read(repo: String, path: String, ref: String): Pair<String, String> {
-        val e = JSON.decodeFromJsonElement<Entry>(contents(repo, path, ref))
-        if (e.size > MAX_EDITABLE_BYTES) error("File is ${e.size / 1024}KB — too big to edit here")
-        val bytes = Base64.decode((e.content ?: "").replace("\n", ""), Base64.NO_WRAP)
-        if (bytes.any { it == 0.toByte() }) error("Binary file — nothing to edit")
-        return String(bytes, Charsets.UTF_8) to e.sha
-    }
+    suspend fun read(repo: String, path: String, ref: String): Pair<String, String> =
+        parseFile(contentsJson(repo, path, ref))
 
     /** Current blob sha for a path, or null if it isn't there any more. */
     suspend fun shaOf(repo: String, path: String, ref: String): String? = runCatching {
-        JSON.decodeFromJsonElement<Entry>(contents(repo, path, ref)).sha
+        parseFile(contentsJson(repo, path, ref)).second
     }.getOrNull()
+
+    /** Commits that touched one path, newest first. */
+    suspend fun history(repo: String, path: String, ref: String, limit: Int = 30): List<LogEntry> =
+        http.get(url("repos/$repo/commits")) {
+            parameter("path", path)
+            parameter("sha", ref)
+            parameter("per_page", limit)
+        }.body()
+
+    /** Delete a file. Also one commit, also pushed by GitHub. */
+    suspend fun delete(
+        repo: String,
+        path: String,
+        message: String,
+        branch: String,
+        sha: String,
+    ): Commit = http.delete(url("repos/$repo/contents/${path.trim('/')}")) {
+        contentType(ContentType.Application.Json)
+        setBody(DeleteBody(message, sha, branch))
+    }.body<PutResp>().commit
 
     /**
      * Create or update a file on [branch]. This one call *is* the commit and the push —
@@ -150,6 +179,20 @@ class Gh(token: String) {
             )
         )
     }.body<PutResp>().commit
+}
+
+/** Decode a cached or live directory listing. */
+fun parseList(json: String): List<Entry> =
+    JSON.decodeFromString<List<Entry>>(json)
+        .sortedWith(compareBy({ it.type != "dir" }, { it.name.lowercase() }))
+
+/** Decode a cached or live single-file response into text + blob sha. */
+fun parseFile(json: String): Pair<String, String> {
+    val e = JSON.decodeFromString<Entry>(json)
+    if (e.size > MAX_EDITABLE_BYTES) error("File is ${e.size / 1024}KB - too big to edit here")
+    val bytes = Base64.decode((e.content ?: "").replace("\n", ""), Base64.NO_WRAP)
+    if (bytes.any { it == 0.toByte() }) error("Binary file - nothing to edit")
+    return String(bytes, Charsets.UTF_8) to e.sha
 }
 
 /** HTTP status of a failed call, or null if it never got that far. */
@@ -218,3 +261,10 @@ object DeviceFlow {
         }
     }
 }
+
+/** Repo lists are cached whole, so a cold start with no signal still shows your repos. */
+fun encodeRepos(repos: List<Repo>): String = JSON.encodeToString(REPO_LIST, repos)
+
+fun parseRepos(json: String): List<Repo> = JSON.decodeFromString(REPO_LIST, json)
+
+private val REPO_LIST = kotlinx.serialization.builtins.ListSerializer(Repo.serializer())

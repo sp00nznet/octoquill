@@ -58,4 +58,6 @@ dependencies {
     implementation("io.ktor:ktor-client-okhttp:3.1.3")
     implementation("io.ktor:ktor-client-content-negotiation:3.1.3")
     implementation("io.ktor:ktor-serialization-kotlinx-json:3.1.3")
+
+    testImplementation(kotlin("test"))
 }
