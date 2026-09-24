@@ -1,5 +1,6 @@
 package net.sp00nz.octoquill
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -181,9 +182,13 @@ fun QueueScreen(vm: Vm) {
                 supportingContent = {
                     Column {
                         Text(p.message, style = MaterialTheme.typography.labelSmall, maxLines = 2)
+                        val reachable = vm.linked.any { it.repo.full_name == p.repo && !it.rejected }
                         Text(
-                            if (p.conflicted) "changed on GitHub since you wrote this"
-                            else "${wordCount(p.text)} words waiting for signal",
+                            when {
+                                !reachable -> "add ${p.repo} again to push this"
+                                p.conflicted -> "changed on GitHub since you wrote this"
+                                else -> "${wordCount(p.text)} words waiting for signal"
+                            },
                             style = MaterialTheme.typography.labelSmall,
                             color = if (p.conflicted) MaterialTheme.colorScheme.error
                             else MaterialTheme.colorScheme.onSurfaceVariant,
@@ -193,7 +198,7 @@ fun QueueScreen(vm: Vm) {
                 trailingContent = {
                     Row {
                         if (p.conflicted) {
-                            TextButton(onClick = { vm.resolveOverwrite(p) }) { Text("Overwrite") }
+                            TextButton(onClick = { vm.compare(p) }) { Text("Compare") }
                         }
                         TextButton(onClick = { vm.discardPending(p) }) { Text("Discard") }
                     }
@@ -202,4 +207,49 @@ fun QueueScreen(vm: Vm) {
             HorizontalDivider()
         }
     }
+}
+
+/** Theirs against yours, so Overwrite or Discard is a decision rather than a guess. */
+@Composable
+fun CompareDialog(vm: Vm, p: Pending, diff: List<DiffLine>) {
+    val scheme = MaterialTheme.colorScheme
+    AlertDialog(
+        onDismissRequest = vm::closeCompare,
+        title = { Text(p.name) },
+        text = {
+            Column {
+                Text(
+                    "- on GitHub now   + yours",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = scheme.onSurfaceVariant,
+                )
+                LazyColumn {
+                    items(diff) { d ->
+                        Text(
+                            if (d.kind == '~') "  ··· ${d.text}" else "${d.kind} ${d.text}",
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 12.sp,
+                            color = if (d.kind == '~') scheme.onSurfaceVariant else scheme.onSurface,
+                            modifier = Modifier.fillMaxWidth().background(
+                                when (d.kind) {
+                                    '-' -> scheme.errorContainer
+                                    '+' -> scheme.primaryContainer
+                                    else -> androidx.compose.ui.graphics.Color.Transparent
+                                }
+                            ),
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { vm.closeCompare(); vm.resolveOverwrite(p) }) { Text("Keep mine") }
+        },
+        dismissButton = {
+            Row {
+                TextButton(onClick = { vm.closeCompare(); vm.discardPending(p) }) { Text("Keep theirs") }
+                TextButton(onClick = vm::closeCompare) { Text("Close") }
+            }
+        },
+    )
 }

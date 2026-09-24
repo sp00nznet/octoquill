@@ -46,8 +46,9 @@ stops being a problem at all.
 | **Writes offline** | Sync a repo before you go. Browse it, open files, edit, commit. Nothing needs a network until you have one. |
 | **Never loses writing** | The editor mirrors to disk as you type, and again when the app is backgrounded. Reopen a file and it offers back the words Android killed. |
 | **Handles long documents** | A 65-heading draft is unusable as one giant text field. Octoquill shows the outline, you edit one section, and it splices back byte-for-byte. |
-| **Survives editing in two places** | Committed from a laptop while the phone had the file open? GitHub rejects the stale write, your version stays queued and safe, and you choose. |
+| **Survives editing in two places** | Committed from a laptop while the phone had the file open? GitHub rejects the stale write, your version stays queued and safe, and you see the diff before you choose. |
 | **Reads like prose** | Markdown preview, live word count, images and binaries hidden by default. |
+| **Finds things offline** | Search the repo's saved files by name or text, no signal needed. |
 | **Manages files** | New, rename, delete, branch switching, per-file history. |
 
 ## Start
@@ -60,9 +61,10 @@ signed release build, Android 8.0+. Or build it:
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
-Sign in with a `repo`-scoped token, or set up real GitHub sign-in — see
-[docs/setup.md](docs/setup.md). Star a repo to make it home and the app opens straight into
-it next launch. Before you go somewhere without signal, hit **Save repo for offline**.
+Tap **+** to add a repo: sign in with a `repo`-scoped token (or real GitHub sign-in — see
+[docs/setup.md](docs/setup.md)) and pick it. Added repos live on the home screen, which needs
+no network, so the app opens instantly anywhere. Each repo keeps its own token, so a
+fine-grained token scoped to one repo works. Before you go somewhere without signal, hit **Save repo for offline**.
 
 ## Docs
 
@@ -78,11 +80,12 @@ it next launch. Before you go somewhere without signal, hit **Save repo for offl
 | `Api.kt` | Every GitHub call, plus the OAuth device flow |
 | `Store.kt` | Drafts, the offline read cache, and the commit outbox |
 | `Sections.kt` | Heading parsing and the splice. Pure, and unit-tested |
+| `Diff.kt` | Line diff for the conflict screen. Pure, and unit-tested |
 | `Markdown.kt` | The preview renderer |
 | `MainActivity.kt` | `Vm` — all state, the screen stack, every action |
 | `Screens.kt`, `Editor.kt` | The UI |
 
-Seven files. No DI framework, no navigation library, no repository layer, no git library,
+Eight files. No DI framework, no navigation library, no repository layer, no git library,
 no markdown dependency.
 
 ## Licence

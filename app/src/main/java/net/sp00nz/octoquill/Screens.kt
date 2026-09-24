@@ -25,7 +25,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.automirrored.filled.ExitToApp
 import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
@@ -86,6 +85,7 @@ fun App(vm: Vm) {
     var acting by remember { mutableStateOf<Entry?>(null) }
     var renaming by remember { mutableStateOf<Entry?>(null) }
     var deleting by remember { mutableStateOf<Entry?>(null) }
+    var unlinking by remember { mutableStateOf<Linked?>(null) }
 
     fun leave() = if (vm.screen is Screen.Edit && vm.dirty) confirmLeave = true else vm.back()
 
@@ -98,6 +98,10 @@ fun App(vm: Vm) {
         topBar = { TopBar(vm, ::leave) },
         floatingActionButton = {
             when (vm.screen) {
+                Screen.Home -> FloatingActionButton(onClick = vm::startAdd) {
+                    Icon(Icons.Default.Add, "Add a repo")
+                }
+
                 is Screen.Browse -> FloatingActionButton(onClick = { newFileOpen = true }) {
                     Icon(Icons.Default.Add, "New file")
                 }
@@ -116,12 +120,13 @@ fun App(vm: Vm) {
             if (vm.offline || vm.queuedCount > 0) StatusStrip(vm)
             Box(Modifier.fillMaxSize()) {
                 when (vm.screen) {
-                    Screen.Login -> LoginScreen(vm)
-                    Screen.Repos -> RepoList(vm)
+                    Screen.Home -> HomeScreen(vm) { unlinking = it }
+                    Screen.Add -> AddScreen(vm)
                     Screen.Queue -> QueueScreen(vm)
                     is Screen.Browse -> Browser(vm) { acting = it }
                     is Screen.Outline -> Outline(vm)
                     is Screen.Edit -> Editor(vm)
+                    is Screen.Search -> SearchScreen(vm)
                 }
                 if (vm.busy) {
                     LinearProgressIndicator(Modifier.fillMaxWidth().align(Alignment.TopCenter))
@@ -131,6 +136,7 @@ fun App(vm: Vm) {
     }
 
     if (vm.historyOpen) HistoryDialog(vm)
+    vm.comparing?.let { (p, diff) -> CompareDialog(vm, p, diff) }
 
     if (confirmLeave) AlertDialog(
         onDismissRequest = { confirmLeave = false },
@@ -233,6 +239,25 @@ fun App(vm: Vm) {
         )
     }
 
+    unlinking?.let { l ->
+        val waiting = vm.queue.count { it.repo == l.repo.full_name }
+        AlertDialog(
+            onDismissRequest = { unlinking = null },
+            title = { Text("Remove ${l.repo.name}?") },
+            text = {
+                Text(
+                    "Takes it off this list. Nothing on GitHub changes." +
+                        if (waiting > 0) " Its $waiting unsent commit(s) stay on the phone and " +
+                            "push once you add it back." else ""
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { unlinking = null; vm.unlink(l) }) { Text("Remove") }
+            },
+            dismissButton = { TextButton(onClick = { unlinking = null }) { Text("Cancel") } },
+        )
+    }
+
     deleting?.let { e ->
         AlertDialog(
             onDismissRequest = { deleting = null },
@@ -254,17 +279,14 @@ private fun TopBar(vm: Vm, leave: () -> Unit) {
     }
 
     when (val s = vm.screen) {
-        Screen.Login -> Unit
+        Screen.Home -> TopAppBar(
+            title = { Text("Octoquill") },
+            actions = { QueueAction(vm) },
+        )
 
-        Screen.Repos -> TopAppBar(
-            title = { Text(vm.user?.login ?: "Repositories") },
-            actions = {
-                QueueAction(vm)
-                IconButton(onClick = vm::refresh) { Icon(Icons.Default.Refresh, "Refresh") }
-                IconButton(onClick = vm::signOut) {
-                    Icon(Icons.AutoMirrored.Filled.ExitToApp, "Sign out")
-                }
-            },
+        Screen.Add -> TopAppBar(
+            title = { Text(if (vm.addToken == null) "Add a repo" else "Pick a repo") },
+            navigationIcon = backButton,
         )
 
         Screen.Queue -> TopAppBar(
@@ -291,11 +313,17 @@ private fun TopBar(vm: Vm, leave: () -> Unit) {
             actions = {
                 QueueAction(vm)
                 BranchPicker(vm, s.branch)
+                IconButton(onClick = vm::openSearch) { Icon(Icons.Default.Search, "Search") }
                 IconButton(onClick = vm::syncForOffline) {
                     Icon(Icons.Default.Done, "Save repo for offline")
                 }
                 IconButton(onClick = vm::refresh) { Icon(Icons.Default.Refresh, "Refresh") }
             },
+        )
+
+        is Screen.Search -> TopAppBar(
+            title = { Text("Search ${s.repo.name}", maxLines = 1, overflow = TextOverflow.Ellipsis) },
+            navigationIcon = backButton,
         )
 
         is Screen.Outline -> TopAppBar(
@@ -363,7 +391,7 @@ private fun QueueAction(vm: Vm) {
 /** One line that says whether your writing is safe and where it currently lives. */
 @Composable
 private fun StatusStrip(vm: Vm) {
-    val error = vm.conflictedCount > 0
+    val error = vm.conflictedCount > 0 || vm.strandedCount > 0
     val bg = if (error) MaterialTheme.colorScheme.errorContainer
     else MaterialTheme.colorScheme.secondaryContainer
     val fg = if (error) MaterialTheme.colorScheme.onErrorContainer
@@ -371,6 +399,7 @@ private fun StatusStrip(vm: Vm) {
 
     val msg = when {
         vm.conflictedCount > 0 -> "${vm.conflictedCount} need attention - tap Pending"
+        vm.strandedCount > 0 -> "${vm.strandedCount} commit(s) wait for their repo to be added again"
         vm.queuedCount > 0 && vm.offline -> "No signal - ${vm.queuedCount} commit(s) saved, will push automatically"
         vm.queuedCount > 0 -> "${vm.queuedCount} commit(s) waiting to push"
         else -> "No signal - showing what was last synced"
@@ -384,8 +413,73 @@ private fun StatusStrip(vm: Vm) {
     }
 }
 
+/** Repos on this phone. Needs no network, so it is what you see the moment the app opens. */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun LoginScreen(vm: Vm) {
+private fun HomeScreen(vm: Vm, onLongPress: (Linked) -> Unit) {
+    if (vm.linked.isEmpty()) {
+        Column(
+            Modifier.fillMaxSize().padding(24.dp),
+            verticalArrangement = Arrangement.Center,
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Text("Octoquill", style = MaterialTheme.typography.displaySmall)
+            Text(
+                "Write, commit, push",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(24.dp))
+            Button(onClick = vm::startAdd) { Text("Add a repo") }
+            if (vm.queuedCount > 0) {
+                Spacer(Modifier.height(16.dp))
+                Text(
+                    "${vm.queuedCount} commit(s) are still saved on this phone - add their repo " +
+                        "back and they push.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+        return
+    }
+
+    LazyColumn(Modifier.fillMaxSize()) {
+        items(vm.linked, key = { it.repo.full_name }) { l ->
+            val waiting = vm.queue.count { it.repo == l.repo.full_name }
+            ListItem(
+                headlineContent = { Text(l.repo.full_name) },
+                supportingContent = {
+                    Text(
+                        when {
+                            l.rejected -> "GitHub refused this token - tap + to add it again"
+                            waiting > 0 -> "$waiting commit(s) waiting to push"
+                            else -> l.repo.description ?: l.repo.default_branch
+                        },
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        color = if (l.rejected) MaterialTheme.colorScheme.error
+                        else MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                },
+                modifier = Modifier.combinedClickable(
+                    onClick = { vm.openRepo(l.repo) },
+                    onLongClick = { onLongPress(l) },
+                ),
+            )
+            HorizontalDivider()
+        }
+    }
+}
+
+/** Step one: a sign-in (saved, device flow, or a pasted token). Step two: pick a repo it reaches. */
+@Composable
+private fun AddScreen(vm: Vm) {
+    if (vm.addToken != null) {
+        RepoPicker(vm)
+        return
+    }
+
     val ctx = LocalContext.current
     val clip = LocalClipboardManager.current
     var pat by remember { mutableStateOf("") }
@@ -393,17 +487,8 @@ private fun LoginScreen(vm: Vm) {
 
     Column(
         Modifier.fillMaxSize().verticalScroll(rememberScrollState()).imePadding().padding(24.dp),
-        verticalArrangement = Arrangement.Center,
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Text("Octoquill", style = MaterialTheme.typography.displaySmall)
-        Text(
-            "Write, commit, push",
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        Spacer(Modifier.height(32.dp))
-
         val dc = vm.device
         if (dc != null) {
             Card(Modifier.fillMaxWidth()) {
@@ -435,6 +520,20 @@ private fun LoginScreen(vm: Vm) {
             return@Column
         }
 
+        vm.savedSignIns.forEach { (token, label) ->
+            OutlinedButton(
+                onClick = { vm.useToken(token) },
+                enabled = !vm.busy,
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text("Same sign-in as $label", maxLines = 1, overflow = TextOverflow.Ellipsis) }
+            Spacer(Modifier.height(8.dp))
+        }
+        if (vm.savedSignIns.isNotEmpty()) {
+            Spacer(Modifier.height(12.dp))
+            Text("or a new one", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Spacer(Modifier.height(20.dp))
+        }
+
         if (vm.hasOAuthApp) {
             Button(
                 onClick = vm::deviceSignIn,
@@ -456,7 +555,7 @@ private fun LoginScreen(vm: Vm) {
         )
         Spacer(Modifier.height(12.dp))
         Button(
-            onClick = { vm.signInWithToken(pat) },
+            onClick = { vm.useToken(pat) },
             enabled = pat.isNotBlank() && !vm.busy,
             modifier = Modifier.fillMaxWidth(),
         ) { Text("Use token") }
@@ -467,18 +566,19 @@ private fun LoginScreen(vm: Vm) {
 }
 
 @Composable
-private fun RepoList(vm: Vm) {
+private fun RepoPicker(vm: Vm) {
     var q by remember { mutableStateOf("") }
-    val shown = remember(q, vm.repos) {
-        if (q.isBlank()) vm.repos
-        else vm.repos.filter { it.full_name.contains(q, ignoreCase = true) }
+    val onList = vm.linked.map { it.repo.full_name }.toSet()
+    val shown = remember(q, vm.candidates) {
+        if (q.isBlank()) vm.candidates
+        else vm.candidates.filter { it.full_name.contains(q, ignoreCase = true) }
     }
 
     Column(Modifier.fillMaxSize()) {
         OutlinedTextField(
             value = q,
             onValueChange = { q = it },
-            label = { Text("Filter") },
+            label = { Text("Filter ${vm.addLogin}'s repos") },
             leadingIcon = { Icon(Icons.Default.Search, null) },
             singleLine = true,
             modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
@@ -490,13 +590,10 @@ private fun RepoList(vm: Vm) {
                     supportingContent = r.description?.let {
                         { Text(it, maxLines = 2, overflow = TextOverflow.Ellipsis) }
                     },
-                    trailingContent = {
-                        // star a repo and the app opens straight into it next launch
-                        IconButton(onClick = { vm.setHome(r.full_name) }) {
-                            Text(if (vm.homeRepo == r.full_name) "★" else "☆")
-                        }
-                    },
-                    modifier = Modifier.clickable { vm.openRepo(r) },
+                    trailingContent = if (r.full_name in onList) {
+                        { Text("added", style = MaterialTheme.typography.labelSmall) }
+                    } else null,
+                    modifier = Modifier.clickable { vm.link(r) },
                 )
                 HorizontalDivider()
             }
@@ -540,6 +637,39 @@ private fun Browser(vm: Vm, onLongPress: (Entry) -> Unit) {
                     if (vm.showAll) "Hide images and binaries"
                     else "$hidden hidden - show everything"
                 )
+            }
+        }
+    }
+}
+
+@Composable
+private fun SearchScreen(vm: Vm) {
+    Column(Modifier.fillMaxSize()) {
+        OutlinedTextField(
+            value = vm.query,
+            onValueChange = vm::search,
+            label = { Text("Search saved files") },
+            leadingIcon = { Icon(Icons.Default.Search, null) },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+        )
+        Text(
+            "Looks through files saved on this phone, so it works without signal. " +
+                "Tap Save for offline in the repo first to search all of it.",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(horizontal = 16.dp),
+        )
+        LazyColumn(Modifier.fillMaxSize()) {
+            items(vm.hits) { h ->
+                ListItem(
+                    headlineContent = { Text(h.entry.path, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                    supportingContent = if (h.line > 0) {
+                        { Text("${h.line}: ${h.snippet}", maxLines = 2, overflow = TextOverflow.Ellipsis) }
+                    } else null,
+                    modifier = Modifier.clickable { vm.openHit(h) },
+                )
+                HorizontalDivider()
             }
         }
     }

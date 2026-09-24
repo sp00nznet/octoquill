@@ -10,7 +10,13 @@
 - Conflict detection and resolution when the same file is edited in two places
 - Markdown preview, live word count
 - New / rename / delete, branch switching, per-file history
-- Home repo, media hiding
+- Media hiding
+- Home screen of added repos, each with its own token; no sign-out, and a refused token
+  only flags the repo - its queue waits
+- Instant start: the home screen needs no network, and a repo paints from disk first
+- Known dead spots answer from disk instead of waiting out another timeout
+- Conflict diffs: GitHub's version against yours before Keep mine / Keep theirs
+- Search across the repo, over what is saved on the phone, so it works offline
 
 ## Next
 
@@ -36,13 +42,8 @@ queue can be inspected from either.
 move the ref. Four calls instead of one, and real value only when a single change spans
 files. The outbox would need to hold a set of paths rather than one.
 
-**Conflict diffs.** Right now a conflict is Overwrite or Discard. Showing what actually
-differs — theirs against yours — would make that a real decision rather than a guess.
-
 ## Later
 
-- **Search across the repo.** Obvious once a repo has a few dozen files. GitHub's search API
-  works online; offline it would run over the cache.
 - **Syntax highlighting** for code files. Markdown preview covers the writing case, so this
   is only for the times you edit a config file from your phone.
 - **Diffs, pull requests, issues.** Standard GitHub client territory, and none of it is why

@@ -59,16 +59,17 @@ All three are the same tiny keyed-blob class in `Store.kt`, differing only in wh
 | `outbox/` | Queued commits with their base sha and message | The commit lands |
 
 Drafts hold the **whole file** even when you were editing one section, so there is exactly
-one draft per file however you reached it. They deliberately survive sign-out — signing out
-must never eat writing that has not landed.
+one draft per file however you reached it. They and the outbox deliberately survive a repo being
+removed from the list — nothing that touches sign-in may eat writing that has not landed.
 
 ## Offline
 
 Three separate things have to work with no network, and each is handled differently:
 
-1. **Getting in.** The repo list is cached whole, so a cold start with no signal still lands
-   you in your home repo rather than an empty screen or a sign-in form. Only a `401` signs
-   you out; a dropped request keeps the session.
+1. **Getting in.** The home screen is the list of added repos, read from prefs, so it needs
+   no network at all. Opening a repo paints its last listing from disk and refreshes behind
+   it. Nothing signs you out: a `401` only flags that repo to be added again, and its queued
+   commits wait for it.
 2. **Reading.** Listings and file bodies come from the cache when the network fails. A
    response *with* an HTTP status is a real answer and is never masked by the cache — a 404
    stays a 404.

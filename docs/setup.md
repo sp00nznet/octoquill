@@ -47,11 +47,11 @@ Leave that blank and the app shows only the token field.
 
 ## First run
 
-1. Sign in.
-2. **Star** the repo you write in. That makes it home, and the app opens straight into it on
-   every later launch — including with no signal.
+1. Tap **+**, sign in, and pick the repo you write in. It goes on the home screen, which
+   opens instantly on every later launch — including with no signal. Add more the same way;
+   **Same sign-in as ...** reuses a token you already gave it.
 
-<p align="center"><img src="screenshots/02-repos.png" width="230"><br><sub><i>The star sets your home repo.</i></sub></p>
+<p align="center"><img src="screenshots/02-repos.png" width="230"><br><sub><i>Picking a repo to add.</i></sub></p>
 3. Open the repo and tap **Save repo for offline** to pull every text file down.
 
 <p align="center"><img src="screenshots/03-browse.png" width="230"><br><sub><i>Images and binaries are hidden by default; one tap shows them.</i></sub></p>

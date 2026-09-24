@@ -51,8 +51,9 @@ The sequence that must pass:
 
 1. **Online:** open the repo, tap *Save repo for offline*. Expect "N files available offline".
 2. **Airplane mode on.** Force-stop and relaunch the app.
-3. It should land **in your home repo's file list**, not on a sign-in screen or an empty
-   list, with a "No signal" strip.
+3. It should land on the **home screen with your repos**, never a sign-in screen. Tap the
+   repo: its file list appears at once, and a "No signal" strip follows when the network
+   gives up.
 4. Open a file that you never opened individually — the pre-sync should have it.
 5. Edit it. The commit dialog should say the commit will push itself later, and the button
    should read **Commit**, not *Commit & push*.

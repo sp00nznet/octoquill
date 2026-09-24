@@ -26,16 +26,19 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 sealed interface Screen {
-    data object Login : Screen
-    data object Repos : Screen
+    data object Home : Screen
+    data object Add : Screen
     data class Browse(val repo: Repo, val branch: String, val path: String) : Screen
     data class Outline(val repo: Repo, val branch: String, val path: String) : Screen
     data class Edit(val repo: Repo, val branch: String, val path: String) : Screen
+    data class Search(val repo: Repo, val branch: String) : Screen
     data object Queue : Screen
 }
 
@@ -55,6 +58,11 @@ private val MEDIA = setOf(
 
 fun isMedia(name: String) = name.substringAfterLast('.', "").lowercase() in MEDIA
 
+/** A search match. [line] is 1-based, or 0 when it was the filename that matched. */
+data class Hit(val entry: Entry, val line: Int, val snippet: String)
+
+private const val MAX_HITS = 200
+
 class Vm(app: Application) : AndroidViewModel(app) {
 
     // ponytail: token lives in app-private prefs with allowBackup=false. Android's
@@ -64,9 +72,10 @@ class Vm(app: Application) : AndroidViewModel(app) {
     private val drafts = Drafts(app)
     private val cache = Cache(app)
     private val outbox = Outbox(app)
-    private var gh: Gh? = null
+    // one client per distinct token; repos that share a sign-in share a client
+    private val clients = mutableMapOf<String, Gh>()
 
-    val stack = mutableStateListOf<Screen>(Screen.Login)
+    val stack = mutableStateListOf<Screen>(Screen.Home)
     val screen: Screen get() = stack.last()
 
     var busy by mutableStateOf(false); private set
@@ -76,18 +85,21 @@ class Vm(app: Application) : AndroidViewModel(app) {
     /** True when the last load came off the disk cache instead of the network. */
     var offline by mutableStateOf(false); private set
 
-    var user by mutableStateOf<User?>(null); private set
-    var repos by mutableStateOf(emptyList<Repo>()); private set
+    /** The home screen. Read from prefs, so it is on screen before any network is tried. */
+    var linked by mutableStateOf(loadLinks()); private set
     var entries by mutableStateOf(emptyList<Entry>()); private set
     var branches by mutableStateOf(emptyList<String>()); private set
 
-    var homeRepo by mutableStateOf(prefs.getString("home", null)); private set
     var showAll by mutableStateOf(false)
 
     /** Commits written on the phone that have not reached GitHub yet. */
     var queue by mutableStateOf(emptyList<Pending>()); private set
     val queuedCount: Int get() = queue.size
     val conflictedCount: Int get() = queue.count { it.conflicted }
+
+    /** Queued for a repo that is off the list or whose token was refused - cannot push yet. */
+    val strandedCount: Int
+        get() = queue.count { p -> linked.none { it.repo.full_name == p.repo && !it.rejected } }
 
     // ---- the open file ----------------------------------------------------
     // fullText is the file. `section` picks the slice being edited; `text` is that slice.
@@ -109,8 +121,20 @@ class Vm(app: Application) : AndroidViewModel(app) {
     val dirty: Boolean get() = fileDirty || text != sliceOriginal
     val isNewFile: Boolean get() = blobSha == null
 
+    var query by mutableStateOf("")
+    var hits by mutableStateOf(emptyList<Hit>()); private set
+    private var searchJob: Job? = null
+
+    /** A conflicted commit being compared against what is on GitHub now. */
+    var comparing by mutableStateOf<Pair<Pending, List<DiffLine>>?>(null); private set
+
     var pendingDraft by mutableStateOf<String?>(null); private set
     var conflict by mutableStateOf<String?>(null); private set
+
+    // ---- adding a repo: pick a sign-in, then pick from what it can reach ----
+    var addToken by mutableStateOf<String?>(null); private set
+    var addLogin by mutableStateOf(""); private set
+    var candidates by mutableStateOf(emptyList<Repo>()); private set
 
     var device by mutableStateOf<DeviceCode?>(null); private set
     private var deviceJob: Job? = null
@@ -129,9 +153,15 @@ class Vm(app: Application) : AndroidViewModel(app) {
 
     private val onNetwork = object : ConnectivityManager.NetworkCallback() {
         override fun onAvailable(network: Network) {
-            offline = false
-            // signal came back in the woods - land whatever was written without it
-            if (queue.isNotEmpty()) job { drain(announce = true) }
+            // called on a binder thread; hop to main before touching the stack
+            viewModelScope.launch {
+                val was = offline
+                offline = false
+                // signal came back in the woods - land whatever was written without it
+                if (queue.isNotEmpty()) job { drain(announce = true) }
+                // and swap the stale listing for the real one
+                if (was && screen is Screen.Browse) refresh()
+            }
         }
 
         override fun onLost(network: Network) {
@@ -143,7 +173,18 @@ class Vm(app: Application) : AndroidViewModel(app) {
         refreshQueue()
         runCatching { conn?.registerDefaultNetworkCallback(onNetwork) }
         offline = !hasNetwork()
-        prefs.getString("token", null)?.let(::restore)
+        migrateSingleSignIn()
+    }
+
+    /** 0.1 kept one token and a starred home repo; that becomes the first linked repo. */
+    private fun migrateSingleSignIn() {
+        if (linked.isNotEmpty()) return
+        val token = prefs.getString("token", null) ?: return
+        val home = prefs.getString("home", null) ?: return
+        val repo = cache.get("repos", "", "", "")
+            ?.let { runCatching { parseRepos(it) }.getOrNull() }
+            ?.firstOrNull { it.full_name == home } ?: return
+        saveLinks(listOf(Linked(repo, token)))
     }
 
     private fun job(block: suspend () -> Unit): Job = viewModelScope.launch {
@@ -154,19 +195,54 @@ class Vm(app: Application) : AndroidViewModel(app) {
         } catch (c: CancellationException) {
             throw c
         } catch (t: Throwable) {
+            if (t.httpStatus == 401) openRepoName()?.let(::markRejected)
             error = t.readable()
         } finally {
             busy = false
         }
     }
 
-    private fun api(): Gh = gh ?: error("Not signed in")
+    private fun client(token: String): Gh = clients.getOrPut(token) { Gh(token) }
+
+    private fun api(repo: String): Gh {
+        val l = linked.firstOrNull { it.repo.full_name == repo }
+            ?: error("$repo is not on your list - add it again to reach it")
+        return client(l.token)
+    }
+
+    private fun openRepoName(): String? = when (val s = screen) {
+        is Screen.Browse -> s.repo.full_name
+        is Screen.Outline -> s.repo.full_name
+        is Screen.Edit -> s.repo.full_name
+        is Screen.Search -> s.repo.full_name
+        else -> null
+    }
 
     /**
      * Network first, disk second. No signal should make the app read-only, not broken.
      * A response with an HTTP status is a real answer and is never masked by the cache.
      */
     private suspend fun cached(
+        kind: String,
+        repo: String,
+        branch: String,
+        path: String,
+        fetch: suspend () -> String,
+    ): String {
+        if (offline) cache.get(kind, repo, branch, path)?.let { hit ->
+            // Known dead spot: answer from disk now instead of eating another timeout, and
+            // check in the background whether signal is back. Cell signal can return without
+            // onAvailable firing, so this is what clears `offline` on a weak-bars day.
+            // ponytail: one background fetch per navigation, no dedupe - cheap at walking pace
+            viewModelScope.launch {
+                runCatching { cache.put(kind, repo, branch, path, fetch()); offline = false }
+            }
+            return hit
+        }
+        return network(kind, repo, branch, path, fetch)
+    }
+
+    private suspend fun network(
         kind: String,
         repo: String,
         branch: String,
@@ -184,64 +260,64 @@ class Vm(app: Application) : AndroidViewModel(app) {
         hit
     }
 
-    // ---- auth -------------------------------------------------------------
+    // ---- linked repos -----------------------------------------------------
 
-    private suspend fun applyToken(token: String, persist: Boolean) {
-        val g = Gh(token.trim())
-        val who = try {
-            g.me()
+    private fun loadLinks(): List<Linked> = prefs.getString("linked", null)
+        ?.let { runCatching { parseLinks(it) }.getOrNull() } ?: emptyList()
+
+    private fun saveLinks(l: List<Linked>) {
+        linked = l
+        prefs.edit().putString("linked", encodeLinks(l)).apply()
+    }
+
+    private fun markRejected(repo: String) {
+        saveLinks(linked.map { if (it.repo.full_name == repo) it.copy(rejected = true) else it })
+    }
+
+    /** Sign-ins already on the phone, offered when adding another repo: token to a label. */
+    val savedSignIns: List<Pair<String, String>>
+        get() = (linked.filter { !it.rejected }.map { it.token to it.repo.full_name } +
+            listOfNotNull(prefs.getString("token", null)?.let { it to "your earlier sign-in" }))
+            .distinctBy { it.first }
+
+    fun startAdd() {
+        addToken = null
+        candidates = emptyList()
+        stack += Screen.Add
+    }
+
+    fun useToken(token: String) {
+        job { loadCandidates(token.trim()) }
+    }
+
+    private suspend fun loadCandidates(token: String) {
+        val g = client(token)
+        try {
+            addLogin = g.me().login
+            candidates = g.repos()
+            offline = false
         } catch (t: Throwable) {
-            g.close(); throw t
+            if (linked.none { it.token == token }) clients.remove(token)?.close()
+            throw t
         }
-        gh?.close()
-        gh = g
-        user = who
-        if (persist) prefs.edit().putString("token", token.trim()).apply()
+        addToken = token
+    }
+
+    /** Put [r] on the home screen and go straight into it. */
+    fun link(r: Repo) {
+        val token = addToken ?: return
+        saveLinks(linked.filterNot { it.repo.full_name == r.full_name } + Linked(r, token))
         stack.clear()
-        stack += Screen.Repos
-        if (queue.isNotEmpty()) runCatching { drain(announce = true) }
-        loadRepos()
-        repos.firstOrNull { it.full_name == homeRepo }?.let { enterRepo(it) }
+        stack += Screen.Home
+        openRepo(r)
+        // anything written for this repo while it was unreachable can go now
+        if (queue.any { it.repo == r.full_name }) job { drain(announce = true) }
     }
 
-    /** The repo list is cached whole, so a cold start with no signal still gets you in. */
-    private suspend fun loadRepos() {
-        repos = parseRepos(cached("repos", "", "", "") { encodeRepos(api().repos()) })
-    }
-
-    fun signInWithToken(token: String) {
-        job { applyToken(token, persist = true) }
-    }
-
-    /**
-     * Resuming a stored session. A phone opens this app on bad signal all the time, and a
-     * dropped request must not look like being signed out - the sign-in screen is useless
-     * to someone whose token is already sitting in prefs. Only a 401 really signs you out.
-     */
-    private fun restore(token: String) {
-        job {
-            val g = Gh(token)
-            gh?.close()
-            gh = g
-            stack.clear()
-            stack += Screen.Repos
-
-            val online = try {
-                user = g.me()
-                true
-            } catch (t: Throwable) {
-                if (t.httpStatus == 401) {
-                    signOut()
-                    throw t
-                }
-                offline = true
-                false
-            }
-
-            if (online && queue.isNotEmpty()) runCatching { drain(announce = true) }
-            loadRepos()
-            repos.firstOrNull { it.full_name == homeRepo }?.let { enterRepo(it) }
-        }
+    /** Off the list. Its queued commits and drafts stay on disk until it is added back. */
+    fun unlink(l: Linked) {
+        saveLinks(linked - l)
+        if (linked.none { it.token == l.token }) clients.remove(l.token)?.close()
     }
 
     fun deviceSignIn() {
@@ -251,7 +327,7 @@ class Vm(app: Application) : AndroidViewModel(app) {
             val dc = DeviceFlow.start(id)
             device = dc
             try {
-                applyToken(DeviceFlow.await(id, dc), persist = true)
+                loadCandidates(DeviceFlow.await(id, dc))
             } finally {
                 device = null
             }
@@ -265,38 +341,43 @@ class Vm(app: Application) : AndroidViewModel(app) {
         busy = false
     }
 
-    fun signOut() {
-        cancelDeviceSignIn()
-        prefs.edit().remove("token").apply()
-        gh?.close(); gh = null
-        user = null; repos = emptyList(); entries = emptyList(); branches = emptyList()
-        stack.clear()
-        stack += Screen.Login
-        // ponytail: drafts and the outbox deliberately survive sign-out - signing out
-        // must never eat writing that has not landed yet
-    }
-
     // ---- navigation -------------------------------------------------------
-
-    fun setHome(fullName: String) {
-        homeRepo = if (homeRepo == fullName) null else fullName
-        prefs.edit().putString("home", homeRepo).apply()
-    }
 
     private suspend fun loadDir(repo: Repo, branch: String, path: String) {
         entries = parseList(cached("dir", repo.full_name, branch, path) {
-            api().contentsJson(repo.full_name, path, branch)
+            api(repo.full_name).contentsJson(repo.full_name, path, branch)
         })
     }
 
-    private suspend fun enterRepo(r: Repo) {
-        loadDir(r, r.default_branch, "")
-        branches = runCatching { api().branches(r.full_name) }
-            .getOrDefault(listOf(r.default_branch))
+    /**
+     * Paint from disk first, then refresh. Bad signal means a timeout before the network
+     * answers, and an empty screen that long is worse than slightly stale files.
+     */
+    fun openRepo(r: Repo) {
+        val saved = cache.get("dir", r.full_name, r.default_branch, "")
+            ?.let { runCatching { parseList(it) }.getOrNull() }
+        if (saved == null) {
+            job {
+                loadDir(r, r.default_branch, "")
+                branches = runCatching { api(r.full_name).branches(r.full_name) }
+                    .getOrDefault(listOf(r.default_branch))
+                stack += Screen.Browse(r, r.default_branch, "")
+            }
+            return
+        }
+        entries = saved
+        branches = listOf(r.default_branch)
         stack += Screen.Browse(r, r.default_branch, "")
+        val shown = screen
+        job {
+            val fresh = parseList(cached("dir", r.full_name, r.default_branch, "") {
+                api(r.full_name).contentsJson(r.full_name, "", r.default_branch)
+            })
+            // never overwrite a folder someone already tapped into
+            if (screen == shown) entries = fresh
+            branches = runCatching { api(r.full_name).branches(r.full_name) }.getOrDefault(branches)
+        }
     }
-
-    fun openRepo(r: Repo) = job { enterRepo(r) }
 
     /**
      * Pull the whole repo down before you lose signal. Without this you can only read the
@@ -312,7 +393,7 @@ class Vm(app: Application) : AndroidViewModel(app) {
     }
 
     private suspend fun cacheTree(repo: Repo, branch: String, path: String): Int {
-        val json = api().contentsJson(repo.full_name, path, branch)
+        val json = api(repo.full_name).contentsJson(repo.full_name, path, branch)
         cache.put("dir", repo.full_name, branch, path, json)
 
         var n = 0
@@ -324,7 +405,7 @@ class Vm(app: Application) : AndroidViewModel(app) {
                 runCatching {
                     cache.put(
                         "file", repo.full_name, branch, e.path,
-                        api().contentsJson(repo.full_name, e.path, branch),
+                        api(repo.full_name).contentsJson(repo.full_name, e.path, branch),
                     )
                     n++
                 }
@@ -339,21 +420,77 @@ class Vm(app: Application) : AndroidViewModel(app) {
             if (e.type == "dir") {
                 loadDir(b.repo, b.branch, e.path)
                 stack += b.copy(path = e.path)
-                return@job
-            }
-
-            val (remote, sha) = parseFile(cached("file", b.repo.full_name, b.branch, e.path) {
-                api().contentsJson(b.repo.full_name, e.path, b.branch)
-            })
-            loadFile(b.repo, b.branch, e.path, remote, sha)
-
-            if (sections.size >= 2 && (e.size > BIG_FILE_BYTES || sections.size >= 12)) {
-                stack += Screen.Outline(b.repo, b.branch, e.path)
             } else {
-                selectSection(null)
-                stack += Screen.Edit(b.repo, b.branch, e.path)
+                openFile(b.repo, b.branch, e)
             }
         }
+    }
+
+    private suspend fun openFile(repo: Repo, branch: String, e: Entry) {
+        val (remote, sha) = parseFile(cached("file", repo.full_name, branch, e.path) {
+            api(repo.full_name).contentsJson(repo.full_name, e.path, branch)
+        })
+        loadFile(repo, branch, e.path, remote, sha)
+
+        if (sections.size >= 2 && (e.size > BIG_FILE_BYTES || sections.size >= 12)) {
+            stack += Screen.Outline(repo, branch, e.path)
+        } else {
+            selectSection(null)
+            stack += Screen.Edit(repo, branch, e.path)
+        }
+    }
+
+    // ---- search -----------------------------------------------------------
+
+    fun openSearch() {
+        val b = screen as? Screen.Browse ?: return
+        query = ""
+        hits = emptyList()
+        stack += Screen.Search(b.repo, b.branch)
+    }
+
+    /**
+     * Searches what is saved on the phone, so it works with no signal - which is when you
+     * most need to find "that scene with the ferry". "Save for offline" makes it the whole repo.
+     */
+    fun search(q: String) {
+        query = q
+        val s = screen as? Screen.Search ?: return
+        searchJob?.cancel()
+        if (q.isBlank()) {
+            hits = emptyList(); return
+        }
+        searchJob = viewModelScope.launch {
+            delay(250)
+            hits = withContext(Dispatchers.Default) {
+                mutableListOf<Hit>().also { searchCache(s.repo.full_name, s.branch, "", q.trim(), it) }
+            }
+        }
+    }
+
+    private fun searchCache(repo: String, branch: String, path: String, q: String, out: MutableList<Hit>) {
+        val listing = cache.get("dir", repo, branch, path)
+            ?.let { runCatching { parseList(it) }.getOrNull() } ?: return
+        for (e in listing) {
+            if (out.size >= MAX_HITS) return
+            if (e.type == "dir") {
+                searchCache(repo, branch, e.path, q, out)
+                continue
+            }
+            if (e.name.contains(q, ignoreCase = true)) out += Hit(e, 0, "")
+            val text = cache.get("file", repo, branch, e.path)
+                ?.let { runCatching { parseFile(it).first }.getOrNull() } ?: continue
+            text.lineSequence().forEachIndexed { i, line ->
+                if (out.size < MAX_HITS && line.contains(q, ignoreCase = true)) {
+                    out += Hit(e, i + 1, line.trim().take(160))
+                }
+            }
+        }
+    }
+
+    fun openHit(h: Hit) {
+        val s = screen as? Screen.Search ?: return
+        job { openFile(s.repo, s.branch, h.entry) }
     }
 
     private fun loadFile(repo: Repo, branch: String, path: String, remote: String, sha: String?) {
@@ -408,7 +545,8 @@ class Vm(app: Application) : AndroidViewModel(app) {
 
     fun refresh() {
         when (val s = screen) {
-            is Screen.Repos -> job { loadRepos() }
+            is Screen.Home -> job { drain(announce = true) }
+            is Screen.Add -> addToken?.let { t -> job { loadCandidates(t) } }
             is Screen.Browse -> job { loadDir(s.repo, s.branch, s.path) }
             is Screen.Queue -> job { drain(announce = true) }
             else -> Unit
@@ -499,7 +637,7 @@ class Vm(app: Application) : AndroidViewModel(app) {
     fun loadHistory() {
         val (repo, branch, path) = openTarget() ?: return
         historyOpen = true
-        job { history = api().history(repo, path, branch) }
+        job { history = api(repo).history(repo, path, branch) }
     }
 
     fun closeHistory() {
@@ -512,7 +650,7 @@ class Vm(app: Application) : AndroidViewModel(app) {
     fun deleteFile(e: Entry) {
         val b = screen as? Screen.Browse ?: return
         job {
-            api().delete(b.repo.full_name, e.path, "Delete ${e.name}", b.branch, e.sha)
+            api(b.repo.full_name).delete(b.repo.full_name, e.path, "Delete ${e.name}", b.branch, e.sha)
             drafts.clear(b.repo.full_name, b.branch, e.path)
             notice = "Deleted ${e.name}"
             loadDir(b.repo, b.branch, b.path)
@@ -529,9 +667,10 @@ class Vm(app: Application) : AndroidViewModel(app) {
         val target = if (b.path.isEmpty()) newName.trim('/') else "${b.path}/${newName.trim('/')}"
         if (target == e.path || newName.isBlank()) return
         job {
-            val (body, sha) = api().read(b.repo.full_name, e.path, b.branch)
-            api().commit(b.repo.full_name, target, body, "Rename ${e.name} to $newName", b.branch, null)
-            api().delete(b.repo.full_name, e.path, "Rename ${e.name} to $newName (remove old)", b.branch, sha)
+            val gh = api(b.repo.full_name)
+            val (body, sha) = gh.read(b.repo.full_name, e.path, b.branch)
+            gh.commit(b.repo.full_name, target, body, "Rename ${e.name} to $newName", b.branch, null)
+            gh.delete(b.repo.full_name, e.path, "Rename ${e.name} to $newName (remove old)", b.branch, sha)
             drafts.clear(b.repo.full_name, b.branch, e.path)
             notice = "Renamed to $newName"
             loadDir(b.repo, b.branch, b.path)
@@ -579,18 +718,24 @@ class Vm(app: Application) : AndroidViewModel(app) {
      * for one commit there is none for the next, and hammering it wastes battery.
      */
     private suspend fun drain(announce: Boolean) {
-        if (gh == null) return
         var landed = 0
         for (p in outbox.all()) {
             if (p.conflicted) continue
+            // not on the list, or its token was refused: it waits until the repo is added again
+            if (linked.none { it.repo.full_name == p.repo && !it.rejected }) continue
             try {
-                val c = api().commit(p.repo, p.path, p.text, p.message, p.branch, p.baseSha)
+                val c = api(p.repo).commit(p.repo, p.path, p.text, p.message, p.branch, p.baseSha)
                 outbox.remove(p)
                 landed++
                 if (announce) notice = "Pushed ${c.sha.take(7)} to ${p.branch}"
                 offline = false
             } catch (t: Throwable) {
                 when (t.httpStatus) {
+                    401 -> {
+                        markRejected(p.repo)
+                        if (announce) notice = "GitHub refused the token for ${p.repo} - add it again"
+                    }
+
                     409, 422 -> {
                         outbox.put(p.copy(conflicted = true))
                         if (announce) notice = "${p.name} changed on GitHub - open Pending to resolve"
@@ -617,12 +762,28 @@ class Vm(app: Application) : AndroidViewModel(app) {
     /** Resolve a conflicted queue entry by writing over whatever is on the branch now. */
     fun resolveOverwrite(p: Pending) {
         job {
-            val fresh = api().shaOf(p.repo, p.path, p.branch)
-            val c = api().commit(p.repo, p.path, p.text, p.message, p.branch, fresh)
+            val fresh = api(p.repo).shaOf(p.repo, p.path, p.branch)
+            val c = api(p.repo).commit(p.repo, p.path, p.text, p.message, p.branch, fresh)
             outbox.remove(p)
             refreshQueue()
             notice = "Pushed ${c.sha.take(7)} to ${p.branch}"
         }
+    }
+
+    /** Show what GitHub has now against the queued version, before choosing a side. */
+    fun compare(p: Pending) {
+        job {
+            val theirs = try {
+                api(p.repo).read(p.repo, p.path, p.branch).first
+            } catch (t: Throwable) {
+                if (t.httpStatus == 404) "" else throw t // deleted on GitHub: all of yours is new
+            }
+            comparing = p to withContext(Dispatchers.Default) { folded(lineDiff(theirs, p.text)) }
+        }
+    }
+
+    fun closeCompare() {
+        comparing = null
     }
 
     fun discardPending(p: Pending) {
@@ -638,7 +799,7 @@ class Vm(app: Application) : AndroidViewModel(app) {
     override fun onCleared() {
         flushDraft()
         runCatching { conn?.unregisterNetworkCallback(onNetwork) }
-        gh?.close()
+        clients.values.forEach { it.close() }
     }
 }
 
