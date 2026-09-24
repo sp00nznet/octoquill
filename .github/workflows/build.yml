@@ -21,7 +21,10 @@ jobs:
           distribution: temurin
           java-version: '17'
 
+      # The default package list includes the legacy 'tools', which sdkmanager no longer serves.
       - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
 
       - uses: gradle/actions/setup-gradle@v4
 
